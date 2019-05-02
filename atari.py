@@ -1,12 +1,16 @@
 ## Keelan Atari NN
 ###############################################################
 import os
+import numpy as np
 import tensorflow as tf
 import pandas as pd
 import scipy
 import sys
 import time
+from timeit import default_timer as timer
+import argparse
 import sys
+import gym
 ###############################################################
 # Checkpoint dir
 checkpoint_directory = '/home/keelan/ai/Atari/Checkpoints'
@@ -24,11 +28,25 @@ state_image_size = np.array([state_height, state_width])
 state_channels = 2
 state_shape = [state_height, state_width, state_channels]
 
+def _rgb_to_grayscale(image):
+    """
+    Convert an RGB-image into gray-scale using a formula from Wikipedia:
+    https://en.wikipedia.org/wiki/Grayscale
+    """
+
+    # Get the separate colour-channels.
+    r, g, b = image[:, :, 0], image[:, :, 1], image[:, :, 2]
+
+    # Convert to gray-scale using the Wikipedia formula.
+    img_gray = 0.2990 * r + 0.5870 * g + 0.1140 * b
+
+    return img_gray
+
 def pre_process_image(image):
     """Pre-process raw image from game environment into a state"""
 
     # Convert to gray-scale
-    img = tf.image.rgb_to_grayscale(image)
+    img = _rgb_to_grayscale(image)
 
     # Resize
     img = scipy.misc.imresize(img, size=state_image_size, interp='bicubic')
@@ -211,7 +229,7 @@ class ReplayMemory:
     def get_batch_indices(self, batch_size):
         # Get random indices from the replay memory (number = batch_size)
 
-        self.indices = np.random.choise(self.current_size, size=batch_size, replace=False)
+        self.indices = np.random.choice(self.current_size, size=batch_size, replace=False)
 
     def get_batch_values(self):
         # Get the states and Q-values for these indices
@@ -248,7 +266,7 @@ class NeuralNetwork:
 
         # Inputting states into the neural network
         #with tf.name_scope("inputs"):
-        self.states = tf.placeholder(dtype=tf.float32, shape=[None] + self.state_shape, name='state')
+        self.states = tf.placeholder(dtype=tf.float32, shape=[None] + state_shape, name='state')
 
         # Learning rate placeholder
         self.learning_rate = tf.placeholder(dtype=tf.float32, shape=[])
@@ -268,40 +286,40 @@ class NeuralNetwork:
         # CNN Layer 1
         c_layer1 = tf.layers.conv2d(inputs=self.states, name='CNN_layer1', filters=16,
                                   kernel_size=3, strides=2, padding=padding,
-                                  kernel_initializer=init, activation=activation)
+                                  kernel_initializer=weights, activation=activation)
 
         # CNN Layer 2
         c_layer2 = tf.layers.conv2d(inputs=c_layer1, name='CNN_layer2', filters=32,
                                   kernel_size=3, strides=2, padding=padding,
-                                  kernel_initializer=init, activation=activation)
+                                  kernel_initializer=weights, activation=activation)
 
         # CNN Layer 3
         c_layer3 = tf.layers.conv2d(inputs=c_layer2, name='CNN_layer3', filters=64,
                                   kernel_size=3, strides=1, padding=padding,
-                                  kernel_initializer=init, activation=activation)
+                                  kernel_initializer=weights, activation=activation)
 
         # Flatten output to input into fully-connected network
-        flatten_output = tf.contrib.layers.flatten(layer3)
+        flatten_output = tf.contrib.layers.flatten(c_layer3)
 
         # 1st FC-layer
         fc_layer1 = tf.layers.dense(inputs=flatten_output, name='fc_layer1', units=1024,
-                                     kernel_initializer=init, activation=activation)
+                                     kernel_initializer=weights, activation=activation)
 
         # 2nd
         fc_layer2 = tf.layers.dense(inputs=fc_layer1, name='fc_layer2', units=1024,
-                                     kernel_initializer=init, activation=activation)
+                                     kernel_initializer=weights, activation=activation)
 
         # 3rd
         fc_layer3 = tf.layers.dense(inputs=fc_layer2, name='fc_layer3', units=1024,
-                                     kernel_initializer=init, activation=activation)
+                                     kernel_initializer=weights, activation=activation)
 
         #4th
         fc_layer4 = tf.layers.dense(inputs=fc_layer3, name='fc_layer4', units=1024,
-                                     kernel_initializer=init, activation=activation)
+                                     kernel_initializer=weights, activation=activation)
 
         #5th
-        output_layer = tf.layers.dense(inputs=fc_layer4, name='fc_layer5', units=1024,
-                                     kernel_initializer=init, activation=activation)
+        output_layer = tf.layers.dense(inputs=fc_layer4, name='fc_layer5', units=num_actions,
+                                     kernel_initializer=weights, activation=None)
         # Set the Q-values equal to the output from the output layer
         #with tf.name_scope('Q-values'):
         self.q_values = output_layer
@@ -390,16 +408,18 @@ class Agent:
     Agent that replies to the user simulator
     """
 
-    def __init__(self, env_name, training, render=False):
+    def __init__(self, training, render=False):
         """
         Parameters:
             env_name: Name of the env in OpenAI
-            training: Training or testing. This is for run()
+            training: Training or testing. This is for env_narun()
             render: Whether to render the game to the screen or not
         """
 
         # Create the game-env using OpenAI Gym
-        self.env = gym.make(env_name)
+        self.env = gym.make('Breakout-v0')
+
+        self.num_actions = self.env.action_space.n
 
         # Training or testing
         self.training = training
@@ -451,7 +471,7 @@ class Agent:
             action: the selected action to take in the game
         """
 
-        if np.random.random() < self.epsilion:
+        if np.random.random() < self.epsilon:
             # Random action
             action = np.random.randint(low=0, high=self.num_actions)
         else:
@@ -466,7 +486,7 @@ class Agent:
 
         return action
 
-    def run(self, num_episodes=None):
+    def run(self, num_episodes=100):
         """
         Description:
             Run the agent in either training or testing mode
@@ -526,13 +546,13 @@ class Agent:
                 # Check if a life was lost
                 num_lives_new = self.get_lives()
                 end_life = (num_lives_new < num_lives)
-                num_lives = new_lives_new
+                num_lives = num_lives_new
 
                 # Increment the counter for states
                 count_states += 1
 
                 # Add to replay memory
-                self.replay_memory.add(state=state,q_values=q_values,action=action,reward=reward,end_life=end_life,end_episode=end_episode)
+                self.replay_memory.add_memory(state=state,q_values=q_values,action=action,reward=reward,end_life=end_life,end_episode=end_episode)
 
                 if self.replay_memory.is_full():
                     # If the replay memory is full, update all the Q-values in a backwards sweep
@@ -575,14 +595,14 @@ class Agent:
 
 
 
-if __name == '__main__':
+if __name__ == '__main__':
     # Running the system from command line
 
     # Parsing for command line
     description = "Q-Learning chatbot"
 
     # Create parser and arguments
-    parser = argparse.ArgumentParset(description=description)
+    parser = argparse.ArgumentParser(description=description)
 
     # Training argument: add "-training" to run training
     parser.add_argument("-training", required=False,
